@@ -50,20 +50,20 @@ import httpx
 import msgspec
 import psutil
 import structlog
-from pydantic import TypeAdapter
+from pydantic import BaseModel, TypeAdapter
 
 from airflow.sdk.api.client import Client, ServerResponseError
 from airflow.sdk.api.datamodels._generated import (
-    ConnectionResponse,
     IntermediateTIState,
     TaskInstance,
     TerminalTIState,
-    VariableResponse,
 )
 from airflow.sdk.execution_time.comms import (
+    Ack,
     AssetResult,
     ConnectionResult,
     DeferTask,
+    ErrorResponse,
     GetAssetByName,
     GetAssetByUri,
     GetConnection,
@@ -758,58 +758,57 @@ class ActivitySubprocess(WatchedSubprocess):
 
     def _handle_request(self, msg: ToSupervisor, log: FilteringBoundLogger):
         log.debug("Received message from task runner", msg=msg)
-        resp = None
-        if isinstance(msg, TaskState):
-            self._terminal_state = msg.state
-            self._task_end_time_monotonic = time.monotonic()
-        elif isinstance(msg, GetConnection):
-            conn = self.client.connections.get(msg.conn_id)
-            if isinstance(conn, ConnectionResponse):
-                conn_result = ConnectionResult.from_conn_response(conn)
-                resp = conn_result.model_dump_json(exclude_unset=True).encode()
+        resp: BaseModel = Ack(ok=True)
+        try:
+            if isinstance(msg, TaskState):
+                self._terminal_state = msg.state
+                self._task_end_time_monotonic = time.monotonic()
+            elif isinstance(msg, GetConnection):
+                conn = self.client.connections.get(msg.conn_id)
+                resp = ConnectionResult.from_conn_response(conn)
+            elif isinstance(msg, GetVariable):
+                var = self.client.variables.get(msg.key)
+                resp = VariableResult.from_variable_response(var)
+            elif isinstance(msg, GetXCom):
+                xcom = self.client.xcoms.get(msg.dag_id, msg.run_id, msg.task_id, msg.key, msg.map_index)
+                resp = XComResult.from_xcom_response(xcom)
+            elif isinstance(msg, DeferTask):
+                self._terminal_state = IntermediateTIState.DEFERRED
+                self.client.task_instances.defer(self.id, msg)
+            elif isinstance(msg, RescheduleTask):
+                self._terminal_state = IntermediateTIState.UP_FOR_RESCHEDULE
+                self.client.task_instances.reschedule(self.id, msg)
+            elif isinstance(msg, SetXCom):
+                self.client.xcoms.set(msg.dag_id, msg.run_id, msg.task_id, msg.key, msg.value, msg.map_index)
+            elif isinstance(msg, PutVariable):
+                self.client.variables.set(msg.key, msg.value, msg.description)
+            elif isinstance(msg, SetRenderedFields):
+                self.client.task_instances.set_rtif(self.id, msg.rendered_fields)
+            elif isinstance(msg, GetAssetByName):
+                asset_resp = self.client.assets.get(name=msg.name)
+                resp = AssetResult.from_asset_response(asset_resp)
+            elif isinstance(msg, GetAssetByUri):
+                asset_resp = self.client.assets.get(uri=msg.uri)
+                resp = AssetResult.from_asset_response(asset_resp)
+            elif isinstance(msg, GetPrevSuccessfulDagRun):
+                dagrun_resp = self.client.task_instances.get_previous_successful_dagrun(self.id)
+                resp = PrevSuccessfulDagRunResult.from_dagrun_response(dagrun_resp)
             else:
-                resp = conn.model_dump_json().encode()
-        elif isinstance(msg, GetVariable):
-            var = self.client.variables.get(msg.key)
-            if isinstance(var, VariableResponse):
-                var_result = VariableResult.from_variable_response(var)
-                resp = var_result.model_dump_json(exclude_unset=True).encode()
-            else:
-                resp = var.model_dump_json().encode()
-        elif isinstance(msg, GetXCom):
-            xcom = self.client.xcoms.get(msg.dag_id, msg.run_id, msg.task_id, msg.key, msg.map_index)
-            xcom_result = XComResult.from_xcom_response(xcom)
-            resp = xcom_result.model_dump_json().encode()
-        elif isinstance(msg, DeferTask):
-            self._terminal_state = IntermediateTIState.DEFERRED
-            self.client.task_instances.defer(self.id, msg)
-        elif isinstance(msg, RescheduleTask):
-            self._terminal_state = IntermediateTIState.UP_FOR_RESCHEDULE
-            self.client.task_instances.reschedule(self.id, msg)
-        elif isinstance(msg, SetXCom):
-            self.client.xcoms.set(msg.dag_id, msg.run_id, msg.task_id, msg.key, msg.value, msg.map_index)
-        elif isinstance(msg, PutVariable):
-            self.client.variables.set(msg.key, msg.value, msg.description)
-        elif isinstance(msg, SetRenderedFields):
-            self.client.task_instances.set_rtif(self.id, msg.rendered_fields)
-        elif isinstance(msg, GetAssetByName):
-            asset_resp = self.client.assets.get(name=msg.name)
-            asset_result = AssetResult.from_asset_response(asset_resp)
-            resp = asset_result.model_dump_json(exclude_unset=True).encode()
-        elif isinstance(msg, GetAssetByUri):
-            asset_resp = self.client.assets.get(uri=msg.uri)
-            asset_result = AssetResult.from_asset_response(asset_resp)
-            resp = asset_result.model_dump_json(exclude_unset=True).encode()
-        elif isinstance(msg, GetPrevSuccessfulDagRun):
-            dagrun_resp = self.client.task_instances.get_previous_successful_dagrun(self.id)
-            dagrun_result = PrevSuccessfulDagRunResult.from_dagrun_response(dagrun_resp)
-            resp = dagrun_result.model_dump_json(exclude_unset=True).encode()
-        else:
-            log.error("Unhandled request", msg=msg)
-            return
+                log.error("Unhandled request", msg=msg)
+                resp = ErrorResponse(detail={"msg": "Unhandled request", "type": type(msg).__name__})
+        except ErrorResponse as e:
+            resp = e
+        except ServerResponseError as e:
+            correlation = e.response.request.headers.get("correlation-id", "no-correlction-id")
+            resp = ErrorResponse(
+                detail={"correlation_id": correlation, "status_code": e.response.status_code}
+            )
+        except Exception as e:
+            # TODO: Send error to task so it can fail there
+            resp = ErrorResponse(detail={"exc_type": type(e).__name__, "msg": str(e)})
 
-        if resp:
-            self.stdin.write(resp + b"\n")
+        blob = resp.model_dump_json(exclude_unset=True).encode()
+        self.stdin.write(blob + b"\n")
 
 
 # Sockets, even the `.makefile()` function don't correctly do line buffering on reading. If a chunk is read

@@ -38,6 +38,7 @@ from airflow.sdk.definitions._internal.dag_parsing_context import _airflow_parsi
 from airflow.sdk.definitions.baseoperator import BaseOperator
 from airflow.sdk.execution_time.comms import (
     DeferTask,
+    ErrorResponse,
     GetXCom,
     RescheduleTask,
     SetRenderedFields,
@@ -248,7 +249,7 @@ class RuntimeTaskInstance(TaskInstance):
 
         xcoms = []
         for t in task_ids:
-            SUPERVISOR_COMMS.send_request(
+            msg = SUPERVISOR_COMMS.send_request(
                 log=log,
                 msg=GetXCom(
                     key=key,
@@ -259,7 +260,6 @@ class RuntimeTaskInstance(TaskInstance):
                 ),
             )
 
-            msg = SUPERVISOR_COMMS.get_message()
             if not isinstance(msg, XComResult):
                 raise TypeError(f"Expected XComResult, received: {type(msg)} {msg}")
 
@@ -370,6 +370,8 @@ class CommsDecoder(Generic[ReceiveMsgType, SendMsgType]):
         Get a message from the parent.
 
         This will block until the message has been received.
+
+        Most of the time you should call ``send_request`` which will call this method
         """
         line = self.input.readline()
         try:
@@ -382,13 +384,19 @@ class CommsDecoder(Generic[ReceiveMsgType, SendMsgType]):
             # If we read a startup message, pull out the FDs we care about!
             if msg.requests_fd > 0:
                 self.request_socket = os.fdopen(msg.requests_fd, "wb", buffering=0)
+        elif isinstance(msg, ErrorResponse):
+            raise msg
         return msg
 
-    def send_request(self, log: Logger, msg: SendMsgType):
+    def send_request(self, log: Logger, msg: SendMsgType) -> ReceiveMsgType:
+        """Send a request to the parent and return the response message (which might be None)."""
+        if TYPE_CHECKING:
+            assert isinstance(msg, BaseModel)
         encoded_msg = msg.model_dump_json().encode() + b"\n"
 
         log.debug("Sending request", json=encoded_msg)
         self.request_socket.write(encoded_msg)
+        return self.get_message()
 
 
 # This global variable will be used by Connection/Variable/XCom classes, or other parts of the task's execution,

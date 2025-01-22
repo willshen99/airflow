@@ -178,7 +178,7 @@ class ConnectionOperations:
     def __init__(self, client: Client):
         self.client = client
 
-    def get(self, conn_id: str) -> ConnectionResponse | ErrorResponse:
+    def get(self, conn_id: str) -> ConnectionResponse:
         """Get a connection from the API server."""
         try:
             resp = self.client.get(f"connections/{conn_id}")
@@ -190,7 +190,11 @@ class ConnectionOperations:
                     detail=e.detail,
                     status_code=e.response.status_code,
                 )
-                return ErrorResponse(error=ErrorType.CONNECTION_NOT_FOUND, detail={"conn_id": conn_id})
+                correlation = e.response.request.headers.get("correlation-id", "no-correlction-id")
+                raise ErrorResponse(
+                    error=ErrorType.CONNECTION_NOT_FOUND,
+                    detail={"conn_id": conn_id, "correlation_id": correlation},
+                )
             raise
         return ConnectionResponse.model_validate_json(resp.read())
 
@@ -201,7 +205,7 @@ class VariableOperations:
     def __init__(self, client: Client):
         self.client = client
 
-    def get(self, key: str) -> VariableResponse | ErrorResponse:
+    def get(self, key: str) -> VariableResponse:
         """Get a variable from the API server."""
         try:
             resp = self.client.get(f"variables/{key}")
@@ -213,7 +217,10 @@ class VariableOperations:
                     detail=e.detail,
                     status_code=e.response.status_code,
                 )
-                return ErrorResponse(error=ErrorType.VARIABLE_NOT_FOUND, detail={"key": key})
+                correlation = e.response.request.headers.get("correlation-id", "no-correlction-id")
+                raise ErrorResponse(
+                    error=ErrorType.VARIABLE_NOT_FOUND, detail={"key": key, "correlation_id": correlation}
+                )
             raise
         return VariableResponse.model_validate_json(resp.read())
 

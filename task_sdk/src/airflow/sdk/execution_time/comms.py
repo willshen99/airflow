@@ -162,7 +162,7 @@ class PrevSuccessfulDagRunResult(PrevSuccessfulDagRunResponse):
         return cls(**prev_dag_run.model_dump(exclude_defaults=True), type="PrevSuccessfulDagRunResult")
 
 
-class ErrorResponse(BaseModel):
+class ErrorResponse(RuntimeError, BaseModel):
     error: ErrorType = ErrorType.GENERIC_ERROR
     detail: dict | None = None
     type: Literal["ErrorResponse"] = "ErrorResponse"
@@ -180,6 +180,12 @@ ToTask = Annotated[
     ],
     Field(discriminator="type"),
 ]
+
+
+class Ack(BaseModel):
+    """An "empty" response when a task doesn't have a more specific one."""
+
+    ok: bool = True
 
 
 class TaskState(BaseModel):
