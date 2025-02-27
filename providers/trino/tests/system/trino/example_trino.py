@@ -64,6 +64,7 @@ with models.DAG(
         INSERT INTO {SCHEMA}.{TABLE1} VALUES (2, 'San Jose');
         CREATE TABLE IF NOT EXISTS {SCHEMA}.{TABLE2}(cityid bigint,cityname varchar);
         INSERT INTO {SCHEMA}.{TABLE2} VALUES (3, 'San Diego');""",
+        split_statements=True,
         handler=list,
     )
     trino_templated_query = SQLExecuteQueryOperator(
